@@ -1,0 +1,11 @@
+.superpowers/
+.agents/
+node_modules/
+dist/
+.vite/
+coverage/
+*.log
+.env
+.env.*
+!.env.example
+assets/characters.zip

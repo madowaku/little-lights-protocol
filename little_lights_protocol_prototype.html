@@ -1,0 +1,433 @@
+
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:var(--font-sans)}
+#game{padding:12px;user-select:none}
+#header{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;gap:8px;flex-wrap:wrap}
+#title{font-size:15px;font-weight:500;color:var(--color-text-primary)}
+#objectives{font-size:12px;color:var(--color-text-secondary)}
+#turn-info{font-size:13px;font-weight:500;color:var(--color-text-primary)}
+#canvas-wrap{position:relative;width:100%;aspect-ratio:4/3;max-height:380px}
+canvas{position:absolute;top:0;left:0;width:100%;height:100%}
+#ui-bar{display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap}
+#status-panel{flex:1;min-width:160px;font-size:12px;color:var(--color-text-secondary);padding:8px;background:var(--color-background-secondary);border-radius:var(--border-radius-md);border:0.5px solid var(--color-border-tertiary);min-height:52px}
+button{font-size:13px;padding:6px 14px;border-radius:var(--border-radius-md);border:0.5px solid var(--color-border-secondary);background:var(--color-background-primary);color:var(--color-text-primary);cursor:pointer}
+button:hover{background:var(--color-background-secondary)}
+button:disabled{opacity:0.4;cursor:default}
+#legend{display:flex;gap:10px;flex-wrap:wrap;margin-top:8px}
+.leg{display:flex;align-items:center;gap:4px;font-size:11px;color:var(--color-text-secondary)}
+.dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+#win-banner{display:none;position:absolute;inset:0;background:rgba(0,0,0,0.55);align-items:center;justify-content:center;flex-direction:column;gap:12px;z-index:10;border-radius:8px}
+#win-banner p{color:#fff;font-size:18px;font-weight:500;text-align:center;padding:0 16px}
+#win-banner button{background:rgba(255,255,255,0.15);color:#fff;border-color:rgba(255,255,255,0.4);padding:8px 20px}
+</style>
+<div id="game">
+  <div id="header">
+    <div>
+      <div id="title">Little Lights Protocol — Reconnect Field 01</div>
+      <div id="objectives">目標: Relay Nodeを3つ再接続 / Tiny Lightを2つ救出</div>
+    </div>
+    <div id="turn-info">Turn 1 — ユニット選択</div>
+  </div>
+  <div id="canvas-wrap">
+    <canvas id="bg"></canvas>
+    <canvas id="main"></canvas>
+    <div id="win-banner">
+      <p id="win-text"></p>
+      <button onclick="resetGame()">もう一度</button>
+    </div>
+  </div>
+  <div id="ui-bar">
+    <div id="status-panel">ユニットをクリックして選択してください</div>
+    <button id="btn-exec" onclick="executeTurn()" disabled>Turn Execute</button>
+    <button onclick="resetGame()">リセット</button>
+  </div>
+  <div id="legend">
+    <div class="leg"><div class="dot" style="background:#5b8dee"></div>接続済み</div>
+    <div class="leg"><div class="dot" style="background:#888"></div>未接続</div>
+    <div class="leg"><div class="dot" style="background:#c0392b"></div>侵食中</div>
+    <div class="leg"><div class="dot" style="background:#f1c40f"></div>救出可能</div>
+  </div>
+</div>
+<script>
+const W=()=>mainC.width, H=()=>mainC.height;
+let mainC,bgC,ctx,bgCtx,nodes,units,enemies,turn,phase,selected,pendingMoves,relayConnected,tinyRescued,gameOver;
+
+const ROLES={core:{color:"#5b8dee",label:"主人公"},scout:{color:"#2ecc71",label:"Scout"},guard:{color:"#e67e22",label:"Guard"},linker:{color:"#9b59b6",label:"Linker"},spark:{color:"#e74c3c",label:"Spark"}};
+const ENEMY_COLORS={noiseBit:"#e74c3c",nullCrawler:"#8e44ad",maskEcho:"#c0392b"};
+const NODE_COLORS={lit:"#5b8dee",dim:"#888",isolated:"#555",corrupted:"#8b1a1a"};
+const LINE_COLORS={lit:"#5b8dee",dim:"#666",isolated:"#444",corrupted:"#8b1a1a"};
+
+function getPos(n){return{x:bgC.width/2+n.gx*(bgC.width/5.5),y:bgC.height/2+n.gy*(bgC.height/4.5)};}
+
+function initNodes(){
+  return[
+    {id:"core",name:"Core Lantern",type:"core",gx:0,gy:0,conn:["relay1","relay3"],state:"lit"},
+    {id:"relay1",name:"北の中継灯",type:"relay",gx:-1.4,gy:-1.4,conn:["core","relay2","tinyA"],state:"lit"},
+    {id:"relay2",name:"文字化けした広場",type:"relay",gx:1.4,gy:-1.4,conn:["relay1","core","tinyB"],state:"corrupted"},
+    {id:"relay3",name:"古い街灯",type:"relay",gx:-1.4,gy:1.4,conn:["core","relay4","tinyC"],state:"dim"},
+    {id:"relay4",name:"忘れられた交差点",type:"relay",gx:1.4,gy:1.4,conn:["relay3","tinyD"],state:"isolated"},
+    {id:"tinyA",name:"小さな窓明かり",type:"tiny",gx:-2.5,gy:-2.5,conn:["relay1"],state:"dim"},
+    {id:"tinyB",name:"■■通りの看板",type:"tiny",gx:2.5,gy:-2.5,conn:["relay2"],state:"corrupted"},
+    {id:"tinyC",name:"誰かの落とし物",type:"tiny",gx:-2.7,gy:1.1,conn:["relay3"],state:"isolated"},
+    {id:"tinyD",name:"消えかけた表札",type:"tiny",gx:2.7,gy:1.1,conn:["relay4"],state:"isolated"},
+  ];
+}
+function initUnits(){
+  return[
+    {id:"u0",name:"Little Core",role:"core",nodeId:"core",acted:false},
+    {id:"u1",name:"Lumi",role:"scout",nodeId:"core",acted:false},
+    {id:"u2",name:"Bastion",role:"guard",nodeId:"core",acted:false},
+    {id:"u3",name:"Weave",role:"linker",nodeId:"core",acted:false},
+    {id:"u4",name:"Zap",role:"spark",nodeId:"core",acted:false},
+  ];
+}
+function initEnemies(){
+  return[
+    {id:"e0",name:"Null Crawler",type:"nullCrawler",nodeId:"relay2",hp:2},
+    {id:"e1",name:"Noise Bit",type:"noiseBit",nodeId:"relay4",hp:1},
+    {id:"e2",name:"Noise Bit",type:"noiseBit",nodeId:"tinyD",hp:1},
+    {id:"e3",name:"Mask Echo",type:"maskEcho",nodeId:"tinyB",hp:2},
+  ];
+}
+
+function resetGame(){
+  nodes=initNodes(); units=initUnits(); enemies=initEnemies();
+  turn=1; phase="select"; selected=null; pendingMoves={};
+  relayConnected=1; tinyRescued=0; gameOver=false;
+  document.getElementById("win-banner").style.display="none";
+  updateTurnInfo(); drawAll();
+  setStatus("ユニットをクリックして選択してください");
+  document.getElementById("btn-exec").disabled=true;
+}
+
+function getNode(id){return nodes.find(n=>n.id===id);}
+function getUnit(nodeId){return units.filter(u=>u.nodeId===nodeId);}
+function getEnemy(nodeId){return enemies.filter(e=>e.nodeId===nodeId);}
+
+function drawAll(){
+  const w=bgC.width,h=bgC.height;
+  bgCtx.clearRect(0,0,w,h);
+  ctx.clearRect(0,0,w,h);
+  drawLines();
+  drawNodes();
+  drawUnits();
+  drawEnemies();
+  if(selected) drawMoveHints();
+}
+
+function drawLines(){
+  const drawn=new Set();
+  nodes.forEach(n=>{
+    const p=getPos(n);
+    n.conn.forEach(cid=>{
+      const key=[n.id,cid].sort().join("-");
+      if(drawn.has(key))return; drawn.add(key);
+      const c=getNode(cid); if(!c)return;
+      const q=getPos(c);
+      const state=n.state==="corrupted"||c.state==="corrupted"?"corrupted":
+                  n.state==="lit"&&c.state==="lit"?"lit":
+                  n.state==="dim"||c.state==="dim"?"dim":"isolated";
+      bgCtx.save();
+      bgCtx.strokeStyle=LINE_COLORS[state];
+      bgCtx.lineWidth=state==="lit"?2.5:1.5;
+      bgCtx.setLineDash(state==="isolated"?[4,4]:state==="dim"?[2,3]:[]);
+      bgCtx.globalAlpha=state==="lit"?1:0.6;
+      bgCtx.beginPath(); bgCtx.moveTo(p.x,p.y); bgCtx.lineTo(q.x,q.y); bgCtx.stroke();
+      bgCtx.restore();
+    });
+  });
+}
+
+function drawNodes(){
+  nodes.forEach(n=>{
+    const p=getPos(n);
+    const r=n.type==="core"?22:n.type==="relay"?16:11;
+    const col=NODE_COLORS[n.state];
+    ctx.save();
+    ctx.beginPath(); ctx.arc(p.x,p.y,r,0,Math.PI*2);
+    ctx.fillStyle=col+"33"; ctx.fill();
+    ctx.strokeStyle=col; ctx.lineWidth=n.type==="core"?3:2;
+    ctx.stroke();
+    if(n.type==="tiny"&&n.state==="dim"){
+      ctx.strokeStyle="#f1c40f"; ctx.lineWidth=2;
+      ctx.beginPath(); ctx.arc(p.x,p.y,r+4,0,Math.PI*2);
+      ctx.setLineDash([2,3]); ctx.stroke();
+    }
+    ctx.restore();
+    const label=n.name.length>8?n.name.slice(0,7)+"…":n.name;
+    ctx.font="11px var(--font-sans)"; ctx.textAlign="center"; ctx.fillStyle="#aaa";
+    ctx.fillText(label,p.x,p.y+r+14);
+  });
+}
+
+function drawUnits(){
+  const offset={};
+  units.forEach(u=>{
+    const p=getPos(getNode(u.nodeId));
+    const k=u.nodeId; offset[k]=(offset[k]||0);
+    const angle=(offset[k]*Math.PI*2/5)-Math.PI/2;
+    const r=getNode(u.nodeId).type==="core"?14:10;
+    const dx=r*Math.cos(angle), dy=r*Math.sin(angle);
+    offset[k]++;
+    const col=ROLES[u.role].color;
+    ctx.save();
+    ctx.beginPath(); ctx.arc(p.x+dx,p.y+dy,7,0,Math.PI*2);
+    ctx.fillStyle=col;
+    if(selected&&selected.id===u.id){ctx.strokeStyle="#fff";ctx.lineWidth=2;ctx.stroke();}
+    if(u.acted){ctx.globalAlpha=0.4;}
+    ctx.fill(); ctx.restore();
+    u._px=p.x+dx; u._py=p.y+dy;
+  });
+  if(pendingMoves){
+    Object.entries(pendingMoves).forEach(([uid,nid])=>{
+      const u=units.find(x=>x.id===uid);
+      const dest=getNode(nid);
+      if(!u||!dest)return;
+      const dp=getPos(dest);
+      ctx.save(); ctx.strokeStyle=ROLES[u.role].color; ctx.lineWidth=1.5;
+      ctx.setLineDash([3,3]);
+      ctx.beginPath(); ctx.moveTo(u._px,u._py); ctx.lineTo(dp.x,dp.y); ctx.stroke();
+      ctx.fillStyle=ROLES[u.role].color; ctx.beginPath(); ctx.arc(dp.x,dp.y,4,0,Math.PI*2); ctx.fill();
+      ctx.restore();
+    });
+  }
+}
+
+function drawEnemies(){
+  const offset={};
+  enemies.forEach(e=>{
+    const n=getNode(e.nodeId); if(!n)return;
+    const p=getPos(n);
+    const k=e.nodeId; offset[k]=(offset[k]||0);
+    const angle=(offset[k]*Math.PI*2/4)+Math.PI/4;
+    const r=12;
+    const dx=r*Math.cos(angle), dy=r*Math.sin(angle);
+    offset[k]++;
+    const col=ENEMY_COLORS[e.type];
+    ctx.save();
+    ctx.translate(p.x+dx,p.y+dy);
+    ctx.rotate(Math.PI/4);
+    ctx.fillStyle=col+"55"; ctx.strokeStyle=col; ctx.lineWidth=1.5;
+    ctx.beginPath(); ctx.rect(-6,-6,12,12); ctx.fill(); ctx.stroke();
+    ctx.restore();
+    e._px=p.x+dx; e._py=p.y+dy;
+  });
+}
+
+function drawMoveHints(){
+  if(!selected)return;
+  const n=getNode(selected.nodeId);
+  n.conn.forEach(cid=>{
+    const c=getNode(cid);
+    const p=getPos(c);
+    ctx.save();
+    ctx.beginPath(); ctx.arc(p.x,p.y,getRadius(c)+6,0,Math.PI*2);
+    ctx.strokeStyle="#fff"; ctx.lineWidth=2; ctx.globalAlpha=0.5;
+    ctx.setLineDash([3,3]); ctx.stroke(); ctx.restore();
+  });
+  const cp=getPos(n);
+  ctx.save(); ctx.beginPath(); ctx.arc(cp.x,cp.y,getRadius(n)+6,0,Math.PI*2);
+  ctx.strokeStyle="#fff"; ctx.lineWidth=2; ctx.globalAlpha=0.5;
+  ctx.setLineDash([3,3]); ctx.stroke(); ctx.restore();
+}
+
+function getRadius(n){return n.type==="core"?22:n.type==="relay"?16:11;}
+
+function handleClick(e){
+  if(gameOver||phase!=="select")return;
+  const rect=mainC.getBoundingClientRect();
+  const sx=mainC.width/rect.width, sy=mainC.height/rect.height;
+  const mx=(e.clientX-rect.left)*sx, my=(e.clientY-rect.top)*sy;
+
+  for(let u of units){
+    if(u._px===undefined)continue;
+    const dx=mx-u._px, dy=my-u._py;
+    if(Math.sqrt(dx*dx+dy*dy)<14&&!u.acted){
+      selected=u;
+      setStatus(`${ROLES[u.role].label}「${u.name}」を選択中。移動先ノードをクリック`);
+      drawAll(); return;
+    }
+  }
+
+  if(selected){
+    const cur=getNode(selected.nodeId);
+    const candidates=[selected.nodeId,...cur.conn];
+    for(let nid of candidates){
+      const n=getNode(nid); if(!n)continue;
+      const p=getPos(n);
+      const dx=mx-p.x, dy=my-p.y;
+      if(Math.sqrt(dx*dx+dy*dy)<getRadius(n)+10){
+        if(nid===selected.nodeId){
+          delete pendingMoves[selected.id];
+          setStatus(`${ROLES[selected.role].label}「${selected.name}」: 待機に設定`);
+        } else {
+          pendingMoves[selected.id]=nid;
+          setStatus(`${ROLES[selected.role].label}「${selected.name}」→ 「${n.name}」へ移動予約`);
+        }
+        selected=null;
+        checkAllOrdered(); drawAll(); return;
+      }
+    }
+    selected=null; drawAll();
+    setStatus("ユニットをクリックして選択してください");
+  }
+}
+
+function checkAllOrdered(){
+  const unacted=units.filter(u=>!u.acted);
+  const allSet=unacted.every(u=>pendingMoves[u.id]!==undefined||true);
+  document.getElementById("btn-exec").disabled=Object.keys(pendingMoves).length===0;
+}
+
+function executeTurn(){
+  if(gameOver)return;
+  phase="execute";
+  document.getElementById("btn-exec").disabled=true;
+  updateTurnInfo();
+
+  units.forEach(u=>{
+    const dest=pendingMoves[u.id];
+    if(dest){
+      resolveMove(u,dest);
+      u.nodeId=pendingMoves[u.id]||u.nodeId;
+    }
+    u.acted=true;
+  });
+  pendingMoves={};
+
+  updateNodeStates();
+  checkObjectives();
+  if(gameOver){drawAll();return;}
+
+  enemyTurn();
+  updateNodeStates();
+  checkObjectives();
+
+  units.forEach(u=>u.acted=false);
+  turn++;
+  phase="select";
+  selected=null;
+  updateTurnInfo();
+  drawAll();
+  if(!gameOver) setStatus("ユニットをクリックして選択してください");
+}
+
+function resolveMove(unit,destId){
+  const destEnemies=enemies.filter(e=>e.nodeId===destId);
+  const destNode=getNode(destId);
+  if(destEnemies.length>0){
+    const bonus=destNode.state==="lit"?1:0;
+    destEnemies.forEach(e=>{
+      if(unit.role==="guard"||unit.role==="spark"||bonus>0){
+        e.hp--;
+        if(e.hp<=0){
+          enemies=enemies.filter(x=>x.id!==e.id);
+          setStatus(`${ROLES[unit.role].label}が${e.name}を撃退した！`);
+        } else {
+          const pushTo=getNode(e.nodeId).conn[0];
+          if(pushTo) e.nodeId=pushTo;
+          setStatus(`${ROLES[unit.role].label}が${e.name}を押し戻した`);
+        }
+      } else {
+        unit.nodeId=unit.nodeId;
+        pendingMoves[unit.id]=unit.nodeId;
+        setStatus(`${ROLES[unit.role].label}は${e.name}に阻まれた`);
+        return;
+      }
+    });
+  }
+  pendingMoves[unit.id]=destId;
+}
+
+function enemyTurn(){
+  enemies.forEach(e=>{
+    const n=getNode(e.nodeId);
+    if(!n)return;
+    let target=null;
+    if(e.type==="nullCrawler"){
+      const relays=n.conn.filter(c=>{const nd=getNode(c);return nd&&nd.type==="relay"&&nd.state!=="corrupted";});
+      target=relays[0]||n.conn[0];
+    } else if(e.type==="maskEcho"){
+      const tinies=n.conn.filter(c=>{const nd=getNode(c);return nd&&nd.type==="tiny";});
+      target=tinies[0]||n.conn[0];
+    } else {
+      target=n.conn[Math.floor(Math.random()*n.conn.length)];
+    }
+    if(target){
+      const destUnit=units.find(u=>u.nodeId===target);
+      if(destUnit){
+        const pushed=getNode(destUnit.nodeId).conn[0];
+        if(pushed){destUnit.nodeId=pushed; setStatus(`${e.name}が${destUnit.name}を押し戻した`);}
+      } else {
+        e.nodeId=target;
+        const nd=getNode(target);
+        if(nd&&nd.type!=="core") nd.state="corrupted";
+      }
+    }
+  });
+}
+
+function updateNodeStates(){
+  nodes.forEach(n=>{
+    const hasUnit=units.some(u=>u.nodeId===n.id);
+    const hasEnemy=enemies.some(e=>e.nodeId===n.id);
+    if(hasUnit&&!hasEnemy){
+      if(n.state!=="lit") n.state="lit";
+    } else if(hasEnemy){
+      if(n.type!=="core") n.state="corrupted";
+    }
+    if(n.type==="tiny"&&hasUnit&&!hasEnemy&&(n.state==="lit"||n.state==="dim")){
+      if(!n.rescued){n.rescued=true; tinyRescued++;}
+    }
+  });
+  let rc=0;
+  nodes.forEach(n=>{if(n.type==="relay"&&n.state==="lit")rc++;});
+  relayConnected=rc;
+}
+
+function checkObjectives(){
+  const core=getNode("core");
+  if(core.state==="corrupted"){
+    endGame(false,"Core Lanternが侵食されました…");return;
+  }
+  if(relayConnected>=3&&tinyRescued>=2){
+    endGame(true,"光が戻ってきた！\nRelay Node 3つ再接続・Tiny Light 2つ救出達成！");
+  }
+}
+
+function endGame(win,msg){
+  gameOver=true;
+  const banner=document.getElementById("win-banner");
+  banner.style.display="flex";
+  document.getElementById("win-text").textContent=msg;
+  drawAll();
+}
+
+function updateTurnInfo(){
+  document.getElementById("turn-info").textContent=`Turn ${turn} — ${phase==="execute"?"実行中":"ユニット選択"} | Relay: ${relayConnected}/3 | 救出: ${tinyRescued}/2`;
+}
+
+function setStatus(msg){
+  document.getElementById("status-panel").textContent=msg;
+}
+
+function resize(){
+  const wrap=document.getElementById("canvas-wrap");
+  const w=wrap.clientWidth, h=wrap.clientHeight;
+  [mainC,bgC].forEach(c=>{c.width=w;c.height=h;});
+  drawAll();
+}
+
+window.addEventListener("load",()=>{
+  mainC=document.getElementById("main");
+  bgC=document.getElementById("bg");
+  ctx=mainC.getContext("2d");
+  bgCtx=bgC.getContext("2d");
+  mainC.addEventListener("click",handleClick);
+  resetGame();
+  const ro=new ResizeObserver(resize);
+  ro.observe(document.getElementById("canvas-wrap"));
+  setTimeout(resize,50);
+});
+</script>
